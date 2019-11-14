@@ -121,7 +121,7 @@ import scala.collection.mutable.ArrayBuffer
   * concurrency bugs. If you're not sure what multi-threading scenario you
   * have, then just stick with the default `MPMC`.
   */
-final class ConcurrentQueue[F[_], A] private (
+final class ConcurrentQueue[F[_], A] private[monix] (
   capacity: BufferCapacity,
   channelType: ChannelType
 )(implicit F: Concurrent[F], cs: ContextShift[F])
