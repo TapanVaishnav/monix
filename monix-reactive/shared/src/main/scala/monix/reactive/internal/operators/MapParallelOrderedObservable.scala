@@ -17,14 +17,12 @@
 
 package monix.reactive.internal.operators
 
-import java.util.concurrent.ConcurrentLinkedQueue
-
+import monix.catnap.ConcurrentQueue
 import monix.eval.Task
 import monix.execution.Ack.{Continue, Stop}
+import monix.execution.ChannelType.{MPMC, MultiProducer}
 import monix.execution.cancelables.CompositeCancelable
-import monix.execution.AsyncSemaphore
-import monix.execution.ChannelType.MultiProducer
-import monix.execution.{Ack, Cancelable, CancelableFuture}
+import monix.execution.{Ack, AsyncSemaphore, BufferCapacity, Cancelable}
 import monix.reactive.observers.{BufferedSubscriber, Subscriber}
 import monix.reactive.{Observable, OverflowStrategy}
 
@@ -74,7 +72,7 @@ private[reactive] final class MapParallelOrderedObservable[A, B](
     // Buffer for signaling new elements downstream preserving original order
     // It needs to be thread safe Queue because we want to allow adding and removing
     // elements at the same time.
-    private[this] val queue = new ConcurrentLinkedQueue[CancelableFuture[B]]
+    private[this] val queue = new ConcurrentQueue[Task, B](BufferCapacity.Bounded(2), MPMC)
     // This lock makes sure that only one thread at the time sends processed elements downstream
     private[this] val sendDownstreamSemaphore = AsyncSemaphore(1)
 
@@ -88,8 +86,8 @@ private[reactive] final class MapParallelOrderedObservable[A, B](
         try {
           composite -= permit
           // Keep checking the head of a queue since we have to signal elements in order
-          while (!shouldStop && !queue.isEmpty && queue.peek().isCompleted) {
-            val head = queue.poll()
+          while (!shouldStop) { // && !queue.isEmpty && queue.peek().isCompleted
+            val head = queue.poll.runToFuture
             head.value match {
               case Some(Success(value)) =>
                 buffer.onNext(value).syncOnComplete {
@@ -146,18 +144,21 @@ private[reactive] final class MapParallelOrderedObservable[A, B](
         // Start execution (forcing an async boundary)
         val future = task.executeAsync.runToFuture
         composite += future.cancelable
-        queue.offer(future)
-        future.onComplete {
-          case Success(_) =>
+        //queue.offer(future.value)
+        future.value match {
+          case Some(Success(res)) =>
             // Current task finished, we can check if there is
             // something to send to the downstream subscriber
+            queue.offer(res)
             sendDownstreamOrdered()
 
-          case Failure(error) =>
+          case Some(Failure(error)) =>
             lastAck = Stop
             composite -= future.cancelable
             composite.cancel()
             self.onError(error)
+
+          case None => // shouldn't get here, we already checked for completion
         }
       } catch {
         case ex if NonFatal(ex) =>
@@ -205,7 +206,7 @@ private[reactive] final class MapParallelOrderedObservable[A, B](
       if (!isDone) {
         isDone = true
         lastAck = Stop
-        queue.clear()
+        queue.clear
         // Outsourcing the handling and safety of onError
         // to our concurrent buffer implementation
         buffer.onError(ex)
